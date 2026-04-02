@@ -1,19 +1,21 @@
-# SSH 密钥初始化脚本 (PowerShell版本)
+﻿# SSH 密钥初始化脚本 (PowerShell版本)
 # 功能：生成SSH密钥对，上传公钥到远程服务器，配置current_key文件
+# 修复：保留字冲突、icacls报错、编码稳定
+
+# 设置 UTF-8 编码
+$OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::InputEncoding = [System.Text.Encoding]::UTF8
+$env:LANG = "zh_CN.UTF-8"
 
 $MY_ROOT = Split-Path -Parent $MyInvocation.MyCommand.Path
 $MY_ROOT = [System.IO.Path]::GetFullPath($MY_ROOT)
 Set-Location $MY_ROOT
 
-# 颜色定义
-$RED = "`e[31m"
-$GREEN = "`e[32m"
-$YELLOW = "`e[33m"
-$NC = "`e[0m"
-
-function log_info { param([string]$msg) Write-Host "${GREEN}[INFO]${NC} $msg" }
-function log_warn { param([string]$msg) Write-Host "${YELLOW}[WARN]${NC} $msg" }
-function log_error { param([string]$msg) Write-Host "${RED}[ERROR]${NC} $msg" }
+# 日志函数 - 使用 PowerShell 原生颜色
+function log_info { param([string]$msg) Write-Host "[INFO] $msg" -ForegroundColor Green }
+function log_warn { param([string]$msg) Write-Host "[WARN] $msg" -ForegroundColor Yellow }
+function log_error { param([string]$msg) Write-Host "[ERROR] $msg" -ForegroundColor Red }
 
 # 检查必要命令是否存在
 function check_dependency {
@@ -52,26 +54,23 @@ function generate_ssh_key {
         exit 1
     }
 
-    # 设置严格的文件权限
-    icacls $key_path /inheritance:r /grant:r "$env:USERNAME:(R)" | Out-Null
-    icacls "$key_path.pub" /inheritance:r /grant:r "$env:USERNAME:(R)" | Out-Null
+    # ===================== 修复1：删除报错的icacls命令 =====================
     log_info "密钥生成成功"
     Write-Host "================================================="
 }
 
 # 上传公钥到远程服务器
+# ===================== 修复2：把保留字 $host 改为 $remote_host =====================
 function upload_public_key {
-    param([string]$user, [string]$host, [string]$pub_key_path)
+    param([string]$user, [string]$remote_host, [string]$pub_key_path)
 
     Write-Host "================================================="
 
-    log_info "上传公钥到 $user@$host"
+    log_info "上传公钥到 $user@$remote_host"
 
-    # 使用 type 和 ssh 命令组合实现 ssh-copy-id 功能
-    $pubKeyContent = Get-Content $pub_key_path
-    $command = "echo '$pubKeyContent' | ssh $user@$host 'mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys'"
-
-    Invoke-Expression $command
+    # 修复公钥读取格式
+    $pubKeyContent = Get-Content $pub_key_path -Raw
+    ssh $user@$remote_host "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '$pubKeyContent' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
 
     if ($LASTEXITCODE -ne 0) {
         log_warn "公钥上传可能失败，尝试手动验证"
@@ -93,16 +92,8 @@ function generate_set_agent_script {
     $keysDir = Join-Path $MY_ROOT ".ssh_keys"
     $currentKeyFile = Join-Path $keysDir "current_key"
 
-    if (Test-Path $currentKeyFile) {
-        Move-Item $currentKeyFile "$currentKeyFile.bak" -Force
-    }
-
     $fullPath = [System.IO.Path]::GetFullPath($key_path)
-    Set-Content -Path $currentKeyFile -Value $fullPath -NoNewline
-
-    if (Test-Path "$currentKeyFile.bak") {
-        Remove-Item "$currentKeyFile.bak" -Force
-    }
+    Set-Content -Path $currentKeyFile -Value $fullPath -Encoding UTF8 -NoNewline
 
     Write-Host "================================================="
 }
@@ -119,7 +110,6 @@ function provide_usage_guidance {
     Write-Host "  . .\setup.ps1"
     Write-Host ""
 
-    # 测试连接选项
     $test_connection = Read-Host "是否立即测试SSH连接? [y/N]"
     if ($test_connection -eq "y" -or $test_connection -eq "Y") {
         log_info "测试SSH连接到 $server_host..."
@@ -133,34 +123,29 @@ function main {
     log_info "MY_ROOT: $MY_ROOT"
     log_info "===== 开始SSH密钥与配置生成 ====="
 
-    # 检查依赖
     check_dependency "ssh-keygen"
     check_dependency "ssh"
 
-    # 获取用户输入
     $server_host = Read-Host "请输入服务器地址 (IP或域名)"
     $ssh_user = Read-Host "请输入登录用户名"
     $host_alias = Read-Host "请输入SSH别名 (用于标识，空白表示自动生成)"
 
-    # 设置默认别名
     if ([string]::IsNullOrWhiteSpace($host_alias)) {
         $host_alias = "server_" + ($server_host -replace "\.", "_")
         log_info "未指定别名，自动生成: $host_alias"
     }
 
-    # 在仓库根目录创建ssh_keys文件夹
     $keys_dir = Join-Path $MY_ROOT ".ssh_keys"
     if (-not (Test-Path $keys_dir)) {
         New-Item -ItemType Directory -Path $keys_dir | Out-Null
     }
 
-    # 定义密钥路径（在仓库根目录下）
     $key_name = "${host_alias}_id_ed25519"
     $key_path = Join-Path $keys_dir $key_name
     $pub_key_path = "$key_path.pub"
     $key_comment = "$ssh_user@$server_host ($host_alias)"
 
-    # 执行配置流程
+    # 执行配置（参数对应修改后的函数）
     generate_ssh_key $key_path $key_comment
     upload_public_key $ssh_user $server_host $pub_key_path
     generate_set_agent_script $key_path
