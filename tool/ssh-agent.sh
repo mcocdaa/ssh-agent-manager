@@ -10,7 +10,11 @@ AGENT_STARTED=false
 # 检查 current_key 配置文件是否存在
 if [[ ! -f "$CURRENT_KEY_FILE" ]]; then
     echo "错误: 未找到密钥配置文件: $CURRENT_KEY_FILE，请先运行 ./init.sh 初始化"
-    return 1 2>/dev/null || exit 1
+    if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+        return 1
+    else
+        exit 1
+    fi
 fi
 
 KEY_PATH="$(head -n 1 "$CURRENT_KEY_FILE")"
@@ -19,7 +23,11 @@ KEY_PATH="${KEY_PATH%%$'\r'}"
 # 检查密钥文件是否存在
 if [[ -z "$KEY_PATH" || ! -f "$KEY_PATH" ]]; then
     echo "错误: 密钥文件不存在: ${KEY_PATH:-<空>}，请重新运行 ./init.sh 初始化"
-    return 1 2>/dev/null || exit 1
+    if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+        return 1
+    else
+        exit 1
+    fi
 fi
 
 # 检查ssh-agent是否已经在运行
@@ -47,7 +55,11 @@ TARGET_FINGERPRINT="$(ssh-keygen -lf "$KEY_PATH" 2>/dev/null | awk '{print $2}')
 if [[ -z "$TARGET_FINGERPRINT" ]]; then
     echo "错误: 无法获取密钥指纹: $KEY_PATH"
     cleanup_new_agent_on_error
-    return 1 2>/dev/null || exit 1
+    if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+        return 1
+    else
+        exit 1
+    fi
 fi
 
 # 2. 获取当前已添加的所有密钥指纹
@@ -76,7 +88,11 @@ else
     else
         echo "✗ 密钥添加失败"
         cleanup_new_agent_on_error
-        return 1 2>/dev/null || exit 1
+        if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+            return 1
+        else
+            exit 1
+        fi
     fi
 fi
 

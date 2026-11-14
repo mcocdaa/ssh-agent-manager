@@ -20,7 +20,11 @@ log_info "MY_ROOT: $MY_ROOT"
 # shellcheck disable=SC1091
 if ! source "$MY_ROOT/tool/ssh-agent.sh"; then
     log_error "SSH Agent 初始化失败，跳过退出清理钩子注册"
-    return 1 2>/dev/null || exit 1
+    if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+        return 1
+    else
+        exit 1
+    fi
 fi
 
 # 添加 shell 退出钩子：仅当本脚本新启动了临时 agent 时关闭它；否则仅卸载本次密钥

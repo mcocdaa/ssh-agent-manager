@@ -103,6 +103,7 @@ EOF
     chmod +x "$sandbox/bin/ssh-agent" "$sandbox/bin/ssh-keygen" "$sandbox/bin/ssh-add"
 
     local out
+    # shellcheck disable=SC2016
     out="$(cd /tmp && env -u SSH_AUTH_SOCK -u SSH_AGENT_PID \
         PATH="$sandbox/bin:$PATH" MOCK_LOG="$log_file" MOCK_NEW_SOCK="$sock_path" \
         bash -c 'source "$1/setup.sh"; echo "MY_ROOT=$MY_ROOT AGENT_STARTED=$AGENT_STARTED"' _ "$sandbox")"
