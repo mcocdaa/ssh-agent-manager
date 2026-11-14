@@ -1,6 +1,6 @@
 #!/bin/bash
-MY_ROOT=$(dirname "$(realpath "$0")")
-cd $MY_ROOT
+MY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+cd "$MY_ROOT" || exit 1
 
 # 颜色定义
 RED='\033[0;31m'
@@ -16,9 +16,32 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 # 检查必要命令是否存在
 check_dependency() {
     local cmd=$1
-    if ! command -v $cmd &> /dev/null; then
+    if ! command -v "$cmd" &> /dev/null; then
         log_error "缺少必要命令: $cmd，请先安装"
         exit 1
+    fi
+}
+
+# 校验用户输入，防止空格、引号或 shell 元字符注入
+validate_input() {
+    local val=$1
+    local field=$2
+    local is_alias=${3:-false}
+    local unsafe_re='[[:space:]'\''"`;$&|<>()]'
+
+    if [[ -z "$val" ]]; then
+        log_error "$field 不能为空"
+        exit 1
+    fi
+    if [[ "$val" =~ $unsafe_re ]]; then
+        log_error "$field 包含不安全字符（请勿包含空白字符、引号或 shell 元字符）"
+        exit 1
+    fi
+    if [[ "$is_alias" == "true" ]]; then
+        if [[ "$val" == *"/"* || "$val" == *"\\"* || "$val" == "." || "$val" == ".." ]]; then
+            log_error "$field 不能包含路径分隔符或 '.' / '..'"
+            exit 1
+        fi
     fi
 }
 
@@ -30,7 +53,7 @@ generate_ssh_key() {
 
     if [ -f "$key_path" ]; then
         log_warn "密钥文件 $key_path 已存在"
-        read -p "是否覆盖? [y/N] " overwrite
+        read -r -p "是否覆盖? [y/N] " overwrite
         if [ "$overwrite" != "y" ] && [ "$overwrite" != "Y" ]; then
             log_info "保持现有密钥"
             return 0
@@ -39,11 +62,14 @@ generate_ssh_key() {
 
     log_info "生成SSH密钥对: $key_path"
     log_info "推荐设置密码以提高安全性，不设置也可以"
-    ssh-keygen -t ed25519 -f "$key_path" -C "$comment"
 
-    if [ $? -eq 0 ]; then
-        log_info "已生成带密码的SSH密钥"
-        log_info "提示：在使用此密钥时，您需要输入密码"
+    if ssh-keygen -t ed25519 -f "$key_path" -C "$comment"; then
+        if ssh-keygen -y -P "" -f "$key_path" >/dev/null 2>&1; then
+            log_warn "已生成无密码的SSH密钥（建议后续使用 ssh-keygen -p 设置密码以提高安全性）"
+        else
+            log_info "已生成带密码的SSH密钥"
+            log_info "提示：在使用此密钥时，您需要输入密码"
+        fi
     else
         log_error "密钥生成失败"
         exit 1
@@ -51,7 +77,7 @@ generate_ssh_key() {
 
     # 设置严格的文件权限
     chmod 600 "$key_path"
-    chmod 600 "${key_path}.pub"
+    chmod 644 "${key_path}.pub"
     log_info "密钥生成成功"
     echo "================================================="
 }
@@ -64,12 +90,10 @@ upload_public_key() {
     local pub_key_path=$3
 
     log_info "上传公钥到 $user@$host"
-    ssh-copy-id -i "$pub_key_path" "$user@$host"
-
-    if [ $? -ne 0 ]; then
+    if ! ssh-copy-id -i "$pub_key_path" "$user@$host"; then
         log_warn "公钥上传可能失败，尝试手动验证"
-        read -p "是否继续? [Y/n] " continue
-        if [ "$continue" = "n" ] || [ "$continue" = "N" ]; then
+        read -r -p "是否继续? [Y/n] " proceed
+        if [ "$proceed" = "n" ] || [ "$proceed" = "N" ]; then
             exit 1
         fi
     fi
@@ -86,7 +110,13 @@ generate_set_agent_script() {
     if [ -f "$current_key_file" ]; then
         mv "$current_key_file" "${current_key_file}.bak"
     fi
-    echo "$(realpath "$key_path")" > "$current_key_file"
+
+    local key_dir key_abs
+    key_dir="$(cd "$(dirname "$key_path")" && pwd -P)"
+    key_abs="$key_dir/$(basename "$key_path")"
+    printf '%s\n' "$key_abs" > "$current_key_file"
+    chmod 600 "$current_key_file"
+
     if [ -f "${current_key_file}.bak" ]; then
         rm -f "${current_key_file}.bak"
     fi
@@ -107,7 +137,7 @@ provide_usage_guidance() {
     echo ""
 
     # 测试连接选项
-    read -p "是否立即测试SSH连接? [y/N] " test_connection
+    read -r -p "是否立即测试SSH连接? [y/N] " test_connection
     if [ "$test_connection" = "y" ] || [ "$test_connection" = "Y" ]; then
         log_info "测试SSH连接到 $server_host..."
         ssh -i "$key_path" "${ssh_user}@${server_host}" "echo 'SSH连接成功!'"
@@ -125,15 +155,21 @@ main() {
     check_dependency "ssh-copy-id"
 
     # 获取用户输入
-    read -p "请输入服务器地址 (IP或域名): " server_host
-    read -p "请输入登录用户名: " ssh_user
-    read -p "请输入SSH别名 (用于标识，空白表示自动生成): " host_alias
+    read -r -p "请输入服务器地址 (IP或域名): " server_host
+    validate_input "$server_host" "服务器地址"
+
+    read -r -p "请输入登录用户名: " ssh_user
+    validate_input "$ssh_user" "登录用户名"
+
+    read -r -p "请输入SSH别名 (用于标识，空白表示自动生成): " host_alias
 
     # 设置默认别名
     if [ -z "$host_alias" ]; then
-        host_alias="server_$(echo "$server_host" | tr '.' '_')"
+        host_alias="server_${server_host//./_}"
+        host_alias="${host_alias//:/_}"
         log_info "未指定别名，自动生成: $host_alias"
     fi
+    validate_input "$host_alias" "SSH别名" "true"
 
     # 在仓库根目录创建ssh_keys文件夹
     local keys_dir="$MY_ROOT/.ssh_keys"
@@ -141,10 +177,10 @@ main() {
     chmod 700 "$keys_dir"
 
     # 定义密钥路径（在仓库根目录下）
-    key_name="${host_alias}_id_ed25519"
-    key_path="$keys_dir/$key_name"
-    pub_key_path="${key_path}.pub"
-    key_comment="${ssh_user}@${server_host} ($host_alias)"
+    local key_name="${host_alias}_id_ed25519"
+    local key_path="$keys_dir/$key_name"
+    local pub_key_path="${key_path}.pub"
+    local key_comment="${ssh_user}@${server_host} ($host_alias)"
 
     # 执行配置流程
     generate_ssh_key "$key_path" "$key_comment"

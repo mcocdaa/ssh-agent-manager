@@ -18,25 +18,22 @@ function log_error { param([string]$msg) Write-Host "[ERROR] $msg" -ForegroundCo
 log_info "MY_ROOT: $env:MY_ROOT"
 
 # 导入 ssh-agent.ps1
+$script:SSH_AGENT_READY = $false
 $agentScript = Join-Path $env:MY_ROOT "tool/ssh-agent.ps1"
 if (Test-Path $agentScript) {
     . $agentScript
+} else {
+    log_error "未找到脚本: $agentScript"
+    return
 }
 
-# 清理函数（Windows 服务版，自动关闭+恢复系统默认）
-function cleanup {
-    Write-Host "`n自动关闭 ssh-agent 服务并复原系统设置..." -ForegroundColor Cyan
-    # 静默管理员权限：停止服务 + 恢复禁用（系统默认）
-    Start-Process powershell -Verb RunAs -ArgumentList @"
-        Stop-Service ssh-agent -Force -ErrorAction SilentlyContinue;
-        Set-Service ssh-agent -StartupType Disabled -ErrorAction SilentlyContinue
-"@ -WindowStyle Hidden -Wait
-
-    # 清理环境变量
-    Remove-Item Env:SSH_AGENT_PID -ErrorAction SilentlyContinue
-    Remove-Item Env:SSH_AUTH_SOCK -ErrorAction SilentlyContinue
-    Write-Host "✅ ssh-agent 已关闭，系统已恢复默认状态" -ForegroundColor Green
+# 仅在加载成功时注册退出事件：卸载本次加载的密钥，不关闭或禁用系统 ssh-agent 服务
+if ($script:SSH_AGENT_READY -and -not [string]::IsNullOrWhiteSpace($KEY_PATH)) {
+    Register-EngineEvent -SourceIdentifier PowerShell.Exiting -MessageData $KEY_PATH -Action {
+        $keyToUnload = $Event.MessageData
+        if (-not [string]::IsNullOrWhiteSpace($keyToUnload)) {
+            & ssh-add -d $keyToUnload 2>$null | Out-Null
+        }
+    } | Out-Null
+    log_info "已注册会话退出钩子：退出时将自动卸载密钥 $(Split-Path $KEY_PATH -Leaf)"
 }
-
-# 注册退出事件
-Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action { cleanup } | Out-Null

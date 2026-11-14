@@ -1,1 +1,4 @@
-.ssh_keys
+.ssh_keys/
+.DS_Store
+*~
+*.swp

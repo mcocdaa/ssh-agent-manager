@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Ensure shellcheck is available
+        run: |
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            brew install shellcheck
+          fi
+
+      - name: Syntax check
+        run: bash -n init.sh setup.sh tool/ssh-agent.sh tests/test_scripts.sh
+
+      - name: ShellCheck
+        run: shellcheck init.sh setup.sh tool/ssh-agent.sh tests/test_scripts.sh
+
+      - name: Run script tests
+        run: bash tests/test_scripts.sh

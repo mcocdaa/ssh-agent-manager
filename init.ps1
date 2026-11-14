@@ -2,8 +2,8 @@
 # 功能：生成SSH密钥对，上传公钥到远程服务器，配置current_key文件
 # 修复：保留字冲突、icacls报错、编码稳定
 
-# 设置 UTF-8 编码
-$OutputEncoding = [System.Text.Encoding]::UTF8
+# 设置 UTF-8 编码（无 BOM 输出）
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::InputEncoding = [System.Text.Encoding]::UTF8
 $env:LANG = "zh_CN.UTF-8"
@@ -16,6 +16,23 @@ Set-Location $MY_ROOT
 function log_info { param([string]$msg) Write-Host "[INFO] $msg" -ForegroundColor Green }
 function log_warn { param([string]$msg) Write-Host "[WARN] $msg" -ForegroundColor Yellow }
 function log_error { param([string]$msg) Write-Host "[ERROR] $msg" -ForegroundColor Red }
+
+# 校验用户输入，防止空白字符、引号或 shell 元字符注入
+function Assert-SafeInput {
+    param([string]$Value, [string]$FieldName, [bool]$IsAlias = $false)
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        log_error "$FieldName 不能为空"
+        exit 1
+    }
+    if ($Value -match '[\s''"`;$&|<>()]') {
+        log_error "$FieldName 包含不安全字符（请勿包含空白字符、引号或 shell 元字符）"
+        exit 1
+    }
+    if ($IsAlias -and ($Value -match '[/\\]' -or $Value -eq '.' -or $Value -eq '..')) {
+        log_error "$FieldName 不能包含路径分隔符或 '.' / '..'"
+        exit 1
+    }
+}
 
 # 检查必要命令是否存在
 function check_dependency {
@@ -47,8 +64,13 @@ function generate_ssh_key {
     ssh-keygen -t ed25519 -f $key_path -C $comment
 
     if ($LASTEXITCODE -eq 0) {
-        log_info "已生成带密码的SSH密钥"
-        log_info "提示：在使用此密钥时，您需要输入密码"
+        & ssh-keygen -y -P "" -f $key_path 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            log_warn "已生成无密码的SSH密钥（建议后续使用 ssh-keygen -p 设置密码以提高安全性）"
+        } else {
+            log_info "已生成带密码的SSH密钥"
+            log_info "提示：在使用此密钥时，您需要输入密码"
+        }
     } else {
         log_error "密钥生成失败"
         exit 1
@@ -68,9 +90,8 @@ function upload_public_key {
 
     log_info "上传公钥到 $user@$remote_host"
 
-    # 修复公钥读取格式
-    $pubKeyContent = Get-Content $pub_key_path -Raw
-    ssh $user@$remote_host "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '$pubKeyContent' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+    # 通过 stdin 管道传输公钥，避免远程 shell 字符串插值注入并去除 CR
+    Get-Content -Path $pub_key_path -Raw | ssh "${user}@${remote_host}" "umask 077; mkdir -p ~/.ssh && chmod 700 ~/.ssh && tr -d '\r' >> ~/.ssh/authorized_keys"
 
     if ($LASTEXITCODE -ne 0) {
         log_warn "公钥上传可能失败，尝试手动验证"
@@ -82,7 +103,7 @@ function upload_public_key {
     Write-Host "================================================="
 }
 
-# 配置current_key文件
+# 配置current_key文件（无 UTF-8 BOM）
 function generate_set_agent_script {
     param([string]$key_path)
 
@@ -93,9 +114,36 @@ function generate_set_agent_script {
     $currentKeyFile = Join-Path $keysDir "current_key"
 
     $fullPath = [System.IO.Path]::GetFullPath($key_path)
-    Set-Content -Path $currentKeyFile -Value $fullPath -Encoding UTF8 -NoNewline
+    [System.IO.File]::WriteAllText($currentKeyFile, $fullPath, [System.Text.UTF8Encoding]::new($false))
 
     Write-Host "================================================="
+}
+
+# 可选写入 ~/.ssh/config（无 UTF-8 BOM）
+function update_ssh_config {
+    param([string]$host_alias, [string]$server_host, [string]$ssh_user, [string]$key_path)
+
+    $addConfig = Read-Host "是否将别名 $host_alias 写入 ~/.ssh/config? [y/N]"
+    if ($addConfig -ne "y" -and $addConfig -ne "Y") {
+        return
+    }
+
+    $sshDir = Join-Path $HOME ".ssh"
+    if (-not (Test-Path $sshDir)) {
+        New-Item -ItemType Directory -Path $sshDir | Out-Null
+    }
+    $sshConfigFile = Join-Path $sshDir "config"
+    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+
+    if ((Test-Path $sshConfigFile) -and (Select-String -Path $sshConfigFile -Pattern ("^Host\s+" + [regex]::Escape($host_alias) + "\s*$") -Quiet)) {
+        log_warn "$sshConfigFile 中已存在 Host $host_alias，跳过写入"
+        return
+    }
+
+    $fullKeyPath = [System.IO.Path]::GetFullPath($key_path)
+    $configEntry = "`nHost $host_alias`n    HostName $server_host`n    User $ssh_user`n    IdentityFile `"$fullKeyPath`"`n"
+    [System.IO.File]::AppendAllText($sshConfigFile, $configEntry, $utf8NoBom)
+    log_info "已写入 SSH 配置: $sshConfigFile"
 }
 
 # 提供使用指导
@@ -127,13 +175,18 @@ function main {
     check_dependency "ssh"
 
     $server_host = Read-Host "请输入服务器地址 (IP或域名)"
+    Assert-SafeInput $server_host "服务器地址"
+
     $ssh_user = Read-Host "请输入登录用户名"
+    Assert-SafeInput $ssh_user "登录用户名"
+
     $host_alias = Read-Host "请输入SSH别名 (用于标识，空白表示自动生成)"
 
     if ([string]::IsNullOrWhiteSpace($host_alias)) {
-        $host_alias = "server_" + ($server_host -replace "\.", "_")
+        $host_alias = "server_" + ($server_host -replace "\.", "_" -replace ":", "_")
         log_info "未指定别名，自动生成: $host_alias"
     }
+    Assert-SafeInput $host_alias "SSH别名" $true
 
     $keys_dir = Join-Path $MY_ROOT ".ssh_keys"
     if (-not (Test-Path $keys_dir)) {
@@ -149,6 +202,7 @@ function main {
     generate_ssh_key $key_path $key_comment
     upload_public_key $ssh_user $server_host $pub_key_path
     generate_set_agent_script $key_path
+    update_ssh_config $host_alias $server_host $ssh_user $key_path
     provide_usage_guidance $key_path $ssh_user $server_host
 
     log_info "===== 配置完成 ====="
